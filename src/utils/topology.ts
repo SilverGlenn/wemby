@@ -9,6 +9,51 @@ export interface ContourMeta {
 }
 
 /**
+ * Reverse the direction of a single SVG subpath ("M ... Z"). Hole subpaths are
+ * reversed to clockwise winding (outers stay CCW from contour normalization)
+ * so fill-rule="nonzero" punches holes correctly - and, unlike evenodd, never
+ * XORs overlapping subpaths into transparent chunks. Geometry is unchanged, so
+ * shared boundaries between layers still abut exactly.
+ */
+export function reverseSvgPath(d: string): string {
+  const toks = d.match(/[MLCZ]|[-+]?\d*\.?\d+/g) || [];
+  const segs: Array<{ type: 'L' | 'C'; x0: number; y0: number; x1: number; y1: number; c1x?: number; c1y?: number; c2x?: number; c2y?: number }> = [];
+  let i = 0, x = 0, y = 0;
+  while (i < toks.length) {
+    const t = toks[i];
+    if (t === 'M') { x = parseFloat(toks[++i]); y = parseFloat(toks[++i]); }
+    else if (t === 'L') {
+      const nx = parseFloat(toks[++i]), ny = parseFloat(toks[++i]);
+      segs.push({ type: 'L', x0: x, y0: y, x1: nx, y1: ny });
+      x = nx; y = ny;
+    }
+    else if (t === 'C') {
+      const c1x = parseFloat(toks[++i]), c1y = parseFloat(toks[++i]);
+      const c2x = parseFloat(toks[++i]), c2y = parseFloat(toks[++i]);
+      const nx = parseFloat(toks[++i]), ny = parseFloat(toks[++i]);
+      segs.push({ type: 'C', x0: x, y0: y, c1x, c1y, c2x, c2y, x1: nx, y1: ny });
+      x = nx; y = ny;
+    }
+    else if (t === 'Z') { i++; }
+    else i++;
+  }
+  if (segs.length === 0) return d;
+  const last = segs[segs.length - 1];
+  const f = (n: number) => (Math.round(n * 100) / 100).toString();
+  let out = `M ${f(last.x1)} ${f(last.y1)}`;
+  for (let k = segs.length - 1; k >= 0; k--) {
+    const s = segs[k];
+    if (s.type === 'L') {
+      out += ` L ${f(s.x0)} ${f(s.y0)}`;
+    } else {
+      out += ` C ${f(s.c2x!)} ${f(s.c2y!)}, ${f(s.c1x!)} ${f(s.c1y!)}, ${f(s.x0)} ${f(s.y0)}`;
+    }
+  }
+  out += ' Z';
+  return out;
+}
+
+/**
  * Calculate signed area of a 2D polygon.
  * Positive = Counter-Clockwise, Negative = Clockwise
  */
@@ -150,7 +195,9 @@ export function groupCompoundPaths(
         rootParent = metas[rootParent].parentIndex;
       }
       if (outerPathsMap.has(rootParent)) {
-        outerPathsMap.get(rootParent)!.push(meta.svgPathData);
+        // Reverse the hole's winding: outers are CCW (normalization), so holes
+        // must be CW for fill-rule="nonzero" to punch them.
+        outerPathsMap.get(rootParent)!.push(reverseSvgPath(meta.svgPathData));
       }
     }
   }
