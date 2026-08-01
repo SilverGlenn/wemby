@@ -22,7 +22,7 @@ test('uses detailed layered tracing for clipart', () => {
 
   assert.equal(options.numberofcolors, 16);
   assert.equal(options.layering, 0);
-  assert.equal(options.colorsampling, 0);
+  assert.equal(options.colorsampling, 1);
   assert.equal(options.pathomit, 16);
   assert.equal(options.ltres, 0.35);
   assert.equal(options.qtres, 0.35);
