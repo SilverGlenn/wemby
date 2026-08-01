@@ -641,12 +641,11 @@ export function mergeThinRimLayers(
       changed = true;
     }
 
-    // Apply remap to pixels. Rim pixels are assigned PER-PIXEL to the majority
-    // color among their 4-connected non-rim neighbors (noise-robust: a rim
-    // between two shades of the same color splits naturally between them
-    // instead of one shade bleeding a full pixel into the other, and JPEG noise
-    // cannot flip individual band pixels into blotches). Pixels without any
-    // non-rim neighbor fall back to the batch (chain-resolved) target.
+    // Apply remap to pixels. Rim pixels are assigned PER-PIXEL to their
+    // Lab-nearest non-rim 4-connected neighbor: a rim between two shades of
+    // the same color splits naturally between them instead of one shade
+    // bleeding a full pixel into the other. Pixels without any non-rim
+    // neighbor fall back to the batch (chain-resolved) target.
     for (let i = 0; i < total; i++) {
       const c = indexedPixels[i];
       // Only per-pixel split colors whose batch merge was approved by the
@@ -655,7 +654,8 @@ export function mergeThinRimLayers(
       if (c >= colorCount || !isRim[c] || remap[c] === c) continue;
       const x = i % width;
       const y = Math.floor(i / width);
-      const counts = new Map<number, number>();
+      let best = -1;
+      let bestDist = Infinity;
       for (const nIdx of [
         y > 0 ? i - width : -1,
         y < height - 1 ? i + width : -1,
@@ -665,27 +665,12 @@ export function mergeThinRimLayers(
         if (nIdx === -1) continue;
         const nc = indexedPixels[nIdx];
         if (nc < colorCount && !isRim[nc]) {
-          counts.set(nc, (counts.get(nc) || 0) + 1);
-        }
-      }
-      let best = -1;
-      let bestCount = 0;
-      counts.forEach((cnt, col) => {
-        if (cnt > bestCount) {
-          bestCount = cnt;
-          best = col;
-        }
-      });
-      // Tie-break by Lab proximity (keeps mid-tone rims on the closer shade).
-      if (best !== -1 && bestCount < 2) {
-        let bestDist = Infinity;
-        counts.forEach((_cnt, col) => {
-          const dist = labDistanceSq(labs[c], labs[col]);
+          const dist = labDistanceSq(labs[c], labs[nc]);
           if (dist < bestDist) {
             bestDist = dist;
-            best = col;
+            best = nc;
           }
-        });
+        }
       }
       indexedPixels[i] = best !== -1 ? best : remap[c];
     }

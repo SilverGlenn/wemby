@@ -627,79 +627,6 @@ export function straightenRuns(points: Point[], epsilon: number): Point[] {
  * a fixed pixel tolerance chases pixel noise on large canvases (rough,
  * over-fitted edges) while being too coarse on tiny ones.
  */
-/**
- * Smooth jitter on curved polygon runs: each non-corner vertex is replaced by
- * a weighted average of itself and its neighbors (2 iterations). Corner
- * vertices stay fixed, so sharp corners are untouched.
- *
- * The smoothing can pull vertices inward on sparse clean polygons (the
- * neighbors' centroid of a convex arc lies inside the curve). To prevent that,
- * each smoothed vertex is clamped: it may never drift more than maxDrift
- * beyond its ORIGINAL distance from the raw contour (jitter is small, so the
- * clamp only binds on the pathological sparse-polygon case).
- */
-export function smoothCurveVertices(
-  points: Point[],
-  cornerIndices: number[],
-  contour: Point[] | null = null,
-  maxDrift: number = 0.8
-): Point[] {
-  const n = points.length;
-  if (n <= 4) return points;
-  const isCorner = new Uint8Array(n);
-  for (const idx of cornerIndices) isCorner[idx] = 1;
-
-  const nearestContour = (p: Point): Point => {
-    let best = Infinity;
-    let bx = p.x, by = p.y;
-    for (const c of contour!) {
-      const dx = c.x - p.x, dy = c.y - p.y;
-      const d = dx * dx + dy * dy;
-      if (d < best) { best = d; bx = c.x; by = c.y; }
-    }
-    return { x: bx, y: by };
-  };
-
-  let pts = points.slice();
-  for (let iter = 0; iter < 2; iter++) {
-    const next = pts.slice();
-    for (let i = 0; i < n; i++) {
-      if (isCorner[i]) continue;
-      const prev = pts[(i - 1 + n) % n];
-      const curr = pts[i];
-      const nx = pts[(i + 1) % n];
-      // Skip averaging across a corner (keeps corner-adjacent edges crisp).
-      const wPrev = isCorner[(i - 1 + n) % n] ? 0 : 0.25;
-      const wNext = isCorner[(i + 1) % n] ? 0 : 0.25;
-      const wSelf = 1 - wPrev - wNext;
-      const denom = wPrev + wSelf + wNext;
-      const sm = {
-        x: (wPrev * prev.x + wSelf * curr.x + wNext * nx.x) / denom,
-        y: (wPrev * prev.y + wSelf * curr.y + wNext * nx.y) / denom,
-      };
-      if (contour && contour.length > 0) {
-        // Clamp: the smoothed vertex must stay within maxDrift of the raw
-        // contour (absolute). The Laplacian's inward sagitta-pull on convex
-        // arcs is thereby bounded to sub-pixel, while genuine jitter averaging
-        // (the centroid sits on the contour) is unaffected.
-        const nc = nearestContour(sm);
-        const dx = sm.x - nc.x, dy = sm.y - nc.y;
-        const dist = Math.hypot(dx, dy);
-        if (dist > maxDrift && dist > 1e-6) {
-          const t = maxDrift / dist;
-          next[i] = { x: nc.x + dx * t, y: nc.y + dy * t };
-        } else {
-          next[i] = sm;
-        }
-      } else {
-        next[i] = sm;
-      }
-    }
-    pts = next;
-  }
-  return pts;
-}
-
 export function potraceFitContour(
   contour: Point[],
   smoothness: number,
@@ -709,7 +636,7 @@ export function potraceFitContour(
   if (contour.length < 3) return '';
 
   const baseAlpha = Math.max(0.4, 1.2 - smoothness * 0.08);
-  const sizeFactor = workingSize > 256 ? Math.min(0.7, (workingSize - 256) * 0.0008) : 0;
+  const sizeFactor = workingSize > 256 ? Math.min(1.4, (workingSize - 256) * 0.0012) : 0;
   let alphamax = Math.min(2.0, baseAlpha + sizeFactor);
 
   // Thin elements (script tails, narrow strokes) cannot tolerate the full
@@ -736,8 +663,5 @@ export function potraceFitContour(
   // then drop any residual kinks introduced at run seams.
   polygon = simplifyNearCollinear(straightenRuns(polygon, alphamax * 0.35), alphamax * 0.4);
   const corners = potraceDetectCorners(polygon, cornerThresholdDeg, normalized, Math.max(0.35, alphamax * 0.25));
-  // Remove residual jitter on curved runs (big arcs stay smooth, corners fixed,
-  // vertices clamped to the contour so sparse polygons cannot shrink inward).
-  polygon = smoothCurveVertices(polygon, corners, normalized);
   return potraceFitBezierPath(polygon, corners, smoothness, alphamax);
 }
