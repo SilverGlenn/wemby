@@ -1,0 +1,591 @@
+export interface Point {
+  x: number;
+  y: number;
+}
+
+export interface CubicSegment {
+  type: 'line' | 'cubic';
+  end: Point;
+  cp1?: Point;
+  cp2?: Point;
+}
+
+/**
+ * Extract 4-connected / 8-connected closed topological boundary cycles for a binary mask.
+ */
+export function extractBoundaryContours(
+  mask: Uint8Array,
+  width: number,
+  height: number
+): Point[][] {
+  const contours: Point[][] = [];
+  const visitedLeft = new Uint8Array((width + 1) * (height + 1));
+
+  const getPixel = (x: number, y: number): number => {
+    if (x < 0 || y < 0 || x >= width || y >= height) return 0;
+    return mask[y * width + x];
+  };
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x;
+      if (mask[idx] === 0) continue;
+
+      const edgeKey = y * (width + 1) + x;
+      if ((x === 0 || mask[idx - 1] === 0) && !visitedLeft[edgeKey]) {
+        const path: Point[] = [];
+        let vx = x;
+        let vy = y;
+        let dir = 2; // 0=UP, 1=RIGHT, 2=DOWN, 3=LEFT
+
+        const startVx = vx;
+        const startVy = vy;
+        const maxSteps = width * height * 4;
+        let steps = 0;
+
+        while (steps < maxSteps) {
+          path.push({ x: vx, y: vy });
+
+          if (dir === 2 && vx >= 0 && vx <= width && vy >= 0 && vy < height) {
+            visitedLeft[vy * (width + 1) + vx] = 1;
+          }
+
+          if (dir === 0) vy--;
+          else if (dir === 1) vx++;
+          else if (dir === 2) vy++;
+          else if (dir === 3) vx--;
+
+          if (vx === startVx && vy === startVy && path.length > 2) break;
+
+          const tl = getPixel(vx - 1, vy - 1);
+          const tr = getPixel(vx, vy - 1);
+          const bl = getPixel(vx - 1, vy);
+          const br = getPixel(vx, vy);
+
+          let FL = 0, FR = 0;
+          if (dir === 0) { FL = tl; FR = tr; }
+          else if (dir === 1) { FL = tr; FR = br; }
+          else if (dir === 2) { FL = br; FR = bl; }
+          else if (dir === 3) { FL = bl; FR = tl; }
+
+          if (FL === 1 && FR === 0) {
+            // straight
+          } else if (FL === 0 && FR === 0) {
+            dir = (dir + 3) % 4; // turn left
+          } else {
+            dir = (dir + 1) % 4; // turn right
+          }
+
+          steps++;
+        }
+
+        if (path.length > 3) {
+          contours.push(path);
+        }
+      }
+    }
+  }
+
+  return contours;
+}
+
+/**
+ * Potrace Algorithm Phase 1: Dynamic Programming Optimal Polygon Fitting.
+ * Solves for the minimal number of vertices that lie within maxDev (epsilon) of the grid boundary contour.
+ */
+export function potraceOptimalPolygon(
+  contour: Point[],
+  alphamax: number = 1.0
+): Point[] {
+  const n = contour.length;
+  if (n <= 4) return contour;
+
+  // Cap the straight-segment reach scan so worst-case cost stays bounded on
+  // large contours (e.g. upscaled logos). Very long straight edges may emit a
+  // few extra collinear vertices, which are exact and harmless (the bezier
+  // fitter renders them as crisp straight segments).
+  const REACH_CAP = 128;
+  const alphamaxSq = alphamax * alphamax;
+
+  // Compute straight-line segment validity matrix for pairs (i, j)
+  // Segment (i, j) is valid if all intermediate contour points lie within alphamax distance of line (i, j)
+  const isStraightValid = (i: number, j: number): boolean => {
+    const count = j >= i ? j - i : n - i + j;
+    if (count <= 1) return true;
+
+    const pStart = contour[i];
+    const pEnd = contour[j];
+    const dx = pEnd.x - pStart.x;
+    const dy = pEnd.y - pStart.y;
+    const lenSq = dx * dx + dy * dy;
+
+    if (lenSq < 1e-6) return true;
+
+    // Squared comparison: |cross| / sqrt(lenSq) <= alphamax  <=>  cross^2 <= alphamax^2 * lenSq
+    const crossConst = pEnd.x * pStart.y - pEnd.y * pStart.x;
+    const tolSq = alphamaxSq * lenSq;
+
+    for (let k = 1; k < count; k++) {
+      const p = contour[(i + k) % n];
+      const cross = dy * p.x - dx * p.y + crossConst;
+      if (cross * cross > tolSq) return false;
+    }
+    return true;
+  };
+
+  // Furthest valid jump from each vertex (bounded by REACH_CAP)
+  const longestReach = new Int32Array(n);
+  const maxScan = Math.min(n - 1, REACH_CAP);
+  for (let i = 0; i < n; i++) {
+    let r = 1;
+    while (r <= maxScan && isStraightValid(i, (i + r) % n)) {
+      r++;
+    }
+    longestReach[i] = Math.min(r - 1, maxScan);
+  }
+
+  // Greedy polygon reconstruction: from each vertex, jump as far as the longest
+  // valid reach allows. (A minimal-vertex DP was previously attempted here but
+  // was never read by the caller and cost O(n^3) - a hard freeze at traced
+  // resolutions >= 1024px.)
+  // Jumps are capped at n-1-curr so they NEVER cross the contour's wrap: a
+  // wrap-spanning jump re-walks the boundary (its chord is "valid" because it
+  // hugs the straight closing run) and the closing edge then becomes a long
+  // diagonal crossing the shape's own notches - evenodd XORs those crossings
+  // into huge transparent chunks. Capped, the walk is monotonic, terminates at
+  // contour[n-1], and the closing edge is the contour's own tiny last->first
+  // boundary edge.
+  const polygon: Point[] = [];
+  const visited = new Uint8Array(n);
+  let curr = 0;
+  let steps = 0;
+
+  while (steps < n && !visited[curr]) {
+    visited[curr] = 1;
+    polygon.push(contour[curr]);
+
+    const reach = Math.max(1, Math.min(longestReach[curr], n - 1 - curr));
+    curr = (curr + reach) % n;
+    steps++;
+
+    if (curr === 0) break;
+  }
+
+  return polygon.length >= 3 ? polygon : contour;
+}
+
+/**
+ * Potrace Algorithm Phase 2: Corner Detection.
+ *
+ * A vertex is a corner when its turn angle exceeds the threshold AND both of
+ * its adjacent edges are STRAIGHT (the raw contour between the vertex and its
+ * polygon neighbors stays within straightTol of the chord). This separates
+ * real corners (which connect two straight edges - e.g. a hexagon's vertices)
+ * from curve vertices (a small circle's polygon vertices have sharp-looking
+ * turns but the contour between them is curved). Small elements and cursive
+ * strokes keep their curves instead of being faceted into polygons.
+ *
+ * When no contour is supplied, falls back to the angle-only test.
+ */
+export function potraceDetectCorners(
+  points: Point[],
+  cornerThresholdDeg: number = 45,
+  contour: Point[] | null = null,
+  straightTol: number = 0.9
+): number[] {
+  const len = points.length;
+  // Polygons can collapse all the way to a triangle under aggressive
+  // tolerances; those vertices are real corners and must be detected
+  // (otherwise a triangle gets fitted as rounded blobs with overshoot).
+  if (len < 3) return [];
+
+  const cornerIndices: number[] = [];
+  const minAngleRad = (cornerThresholdDeg * Math.PI) / 180;
+
+  // Map each polygon vertex to its nearest contour index (polygon vertices are
+  // contour points, possibly shifted <= 0.6px by straighten/projection).
+  let contourIdx: Int32Array | null = null;
+  if (contour && contour.length > 0) {
+    contourIdx = new Int32Array(len);
+    for (let i = 0; i < len; i++) {
+      let best = 0;
+      let bestD = Infinity;
+      for (let k = 0; k < contour.length; k++) {
+        const dx = contour[k].x - points[i].x;
+        const dy = contour[k].y - points[i].y;
+        const d = dx * dx + dy * dy;
+        if (d < bestD) { bestD = d; best = k; }
+      }
+      contourIdx[i] = best;
+    }
+  }
+
+  // Max perpendicular deviation of the contour points between polygon vertices
+  // a and b from the chord (a->b). ~0 for straight edges, ~alphamax for curves.
+  const edgeDev = (a: number, b: number): number => {
+    if (!contour || !contourIdx) return 0;
+    const cA = contourIdx[a];
+    const cB = contourIdx[b];
+    if (cA === cB) return 0;
+    const pA = points[a];
+    const pB = points[b];
+    const dx = pB.x - pA.x;
+    const dy = pB.y - pA.y;
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq < 1e-9) return 0;
+    const invLen = 1 / Math.sqrt(lenSq);
+    let maxD = 0;
+    let k = (cA + 1) % contour.length;
+    while (k !== cB) {
+      const p = contour[k];
+      const d = Math.abs(dy * (p.x - pA.x) - dx * (p.y - pA.y)) * invLen;
+      if (d > maxD) maxD = d;
+      k = (k + 1) % contour.length;
+    }
+    return maxD;
+  };
+
+  for (let i = 0; i < len; i++) {
+    const prev = points[(i - 1 + len) % len];
+    const curr = points[i];
+    const next = points[(i + 1) % len];
+
+    const v1x = curr.x - prev.x;
+    const v1y = curr.y - prev.y;
+    const v2x = next.x - curr.x;
+    const v2y = next.y - curr.y;
+
+    const len1 = Math.hypot(v1x, v1y);
+    const len2 = Math.hypot(v2x, v2y);
+
+    if (len1 < 0.01 || len2 < 0.01) {
+      cornerIndices.push(i);
+      continue;
+    }
+
+    const dotProd = Math.max(-1, Math.min(1, (v1x * v2x + v1y * v2y) / (len1 * len2)));
+    const angle = Math.acos(dotProd);
+
+    if (angle >= minAngleRad) {
+      if (contourIdx) {
+        // Real corners connect two straight edges.
+        const devPrev = edgeDev((i - 1 + len) % len, i);
+        const devNext = edgeDev(i, (i + 1) % len);
+        if (devPrev < straightTol && devNext < straightTol) {
+          cornerIndices.push(i);
+        }
+      } else {
+        cornerIndices.push(i);
+      }
+    }
+  }
+
+  return cornerIndices;
+}
+
+/**
+ * Potrace Algorithm Phase 3: Constrained $C^1$-Continuous Bezier Curve Fitting.
+ */
+export function potraceFitBezierPath(
+  points: Point[],
+  cornerIndices: number[],
+  smoothness: number = 7,
+  maxDeviation: number = 1.0
+): string {
+  const len = points.length;
+  if (len < 3) return '';
+
+  const format = (n: number) => (Math.round(n * 100) / 100).toString();
+
+  // If smoothness <= 1, output crisp linear polygon
+  if (smoothness <= 1 || cornerIndices.length === len) {
+    let d = `M ${format(points[0].x)} ${format(points[0].y)}`;
+    for (let i = 1; i < len; i++) {
+      d += ` L ${format(points[i].x)} ${format(points[i].y)}`;
+    }
+    d += ' Z';
+    return d;
+  }
+
+  const isCorner = new Uint8Array(len);
+  for (const idx of cornerIndices) {
+    isCorner[idx] = 1;
+  }
+
+  // Precompute each corner's turn angle: segments adjacent to SHARP corners
+  // (turn >= 60 deg) render as straight lines so the corner cannot be rounded
+  // by the curve's bow toward it (a chord tangent at the far endpoint points
+  // across the corner). Moderate corners (45-60 deg) keep a tight curve.
+  const cornerTurn = new Float64Array(len);
+  for (const idx of cornerIndices) {
+    const prev = points[(idx - 1 + len) % len];
+    const curr = points[idx];
+    const next = points[(idx + 1) % len];
+    const v1x = curr.x - prev.x, v1y = curr.y - prev.y;
+    const v2x = next.x - curr.x, v2y = next.y - curr.y;
+    const l1 = Math.hypot(v1x, v1y), l2 = Math.hypot(v2x, v2y);
+    if (l1 > 0.01 && l2 > 0.01) {
+      const dot = Math.max(-1, Math.min(1, (v1x * v2x + v1y * v2y) / (l1 * l2)));
+      cornerTurn[idx] = Math.acos(dot) * 180 / Math.PI;
+    }
+  }
+
+  let d = `M ${format(points[0].x)} ${format(points[0].y)}`;
+
+  // Handle tension factor: reduced when either endpoint is a corner so the
+  // chord tangent cannot overshoot past the corner (visible as thin color
+  // spikes poking out of small elements).
+  const tension = Math.min(0.38, 0.20 + smoothness * 0.018);
+
+  for (let i = 0; i < len; i++) {
+    const nextIdx = (i + 1) % len;
+    const p1 = points[i];
+    const p2 = points[nextIdx];
+    const segLen = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+
+    if (segLen < 0.01) continue;
+
+    // If both endpoints are sharp corners, or either endpoint is a SHARP
+    // corner (turn >= 60 deg), draw a straight line segment so the corner
+    // stays perfectly sharp (a curve would bow toward it and round it).
+    if ((isCorner[i] && isCorner[nextIdx]) || cornerTurn[i] >= 60 || cornerTurn[nextIdx] >= 60) {
+      d += ` L ${format(p2.x)} ${format(p2.y)}`;
+    } else {
+      const cornerAdjacent = isCorner[i] || isCorner[nextIdx];
+      const handleDist = cornerAdjacent
+        ? Math.min(segLen * tension, segLen * 0.18)
+        : segLen * tension;
+
+      const p0 = points[(i - 1 + len) % len];
+      const p3 = points[(nextIdx + 1) % len];
+
+      // Tangent vector at p1
+      let t1x: number, t1y: number;
+      if (isCorner[i]) {
+        t1x = p2.x - p1.x;
+        t1y = p2.y - p1.y;
+      } else {
+        t1x = p2.x - p0.x;
+        t1y = p2.y - p0.y;
+      }
+
+      // Tangent vector at p2
+      let t2x: number, t2y: number;
+      if (isCorner[nextIdx]) {
+        t2x = p2.x - p1.x;
+        t2y = p2.y - p1.y;
+      } else {
+        t2x = p3.x - p1.x;
+        t2y = p3.y - p1.y;
+      }
+
+      const t1Len = Math.hypot(t1x, t1y);
+      const t2Len = Math.hypot(t2x, t2y);
+
+      // Clamp handles so the fitted curve cannot overshoot past the polygon by
+      // more than maxDeviation. Unclamped long chords at shallow turns bulge
+      // several px past the polygon; a hole bulging across its parent's fitted
+      // path gets XOR'd into transparent chunks by evenodd. Corner tangents run
+      // along the chord (sin ~ 0) and stay unclamped.
+      const chordDx = p2.x - p1.x;
+      const chordDy = p2.y - p1.y;
+      const chordLen = Math.hypot(chordDx, chordDy);
+      const clampHandle = (hx: number, hy: number, hd: number): number => {
+        const hl = Math.hypot(hx, hy);
+        if (hl < 1e-9 || chordLen < 1e-9) return hd;
+        const sinAng = Math.abs(hx * chordDy - hy * chordDx) / (hl * chordLen);
+        if (sinAng < 1e-6) return hd;
+        return Math.min(hd, Math.max(0.35, maxDeviation / sinAng));
+      };
+      const hd1 = clampHandle(t1x, t1y, handleDist);
+      const hd2 = clampHandle(t2x, t2y, handleDist);
+
+      const cp1x = t1Len > 0 ? p1.x + (t1x / t1Len) * hd1 : p1.x;
+      const cp1y = t1Len > 0 ? p1.y + (t1y / t1Len) * hd1 : p1.y;
+      const cp2x = t2Len > 0 ? p2.x - (t2x / t2Len) * hd2 : p2.x;
+      const cp2y = t2Len > 0 ? p2.y - (t2y / t2Len) * hd2 : p2.y;
+
+      d += ` C ${format(cp1x)} ${format(cp1y)}, ${format(cp2x)} ${format(cp2y)}, ${format(p2.x)} ${format(p2.y)}`;
+    }
+  }
+
+  d += ' Z';
+  return d;
+}
+
+/**
+ * Normalize a contour to a canonical rotation (start at min-y/min-x point)
+ * and counter-clockwise orientation. Two masks sharing a boundary walk it in
+ * opposite directions from different starts; normalization makes both layers
+ * fit the IDENTICAL path, so adjacent fills abut exactly with no seam gap.
+ */
+export function normalizeContour(points: Point[]): Point[] {
+  const n = points.length;
+  if (n <= 2) return points;
+
+  let best = 0;
+  for (let i = 1; i < n; i++) {
+    if (points[i].y < points[best].y || (points[i].y === points[best].y && points[i].x < points[best].x)) {
+      best = i;
+    }
+  }
+
+  const rotated = new Array<Point>(n);
+  for (let i = 0; i < n; i++) rotated[i] = points[(best + i) % n];
+
+  // Force counter-clockwise orientation
+  let area = 0;
+  for (let i = 0; i < n; i++) {
+    const p1 = rotated[i];
+    const p2 = rotated[(i + 1) % n];
+    area += p1.x * p2.y - p2.x * p1.y;
+  }
+  if (area < 0) {
+    rotated.reverse();
+    let b2 = 0;
+    for (let i = 1; i < n; i++) {
+      if (rotated[i].y < rotated[b2].y || (rotated[i].y === rotated[b2].y && rotated[i].x < rotated[b2].x)) {
+        b2 = i;
+      }
+    }
+    if (b2 > 0) {
+      const rerotated = new Array<Point>(n);
+      for (let i = 0; i < n; i++) rerotated[i] = rotated[(b2 + i) % n];
+      return rerotated;
+    }
+  }
+  return rotated;
+}
+
+/**
+ * Remove polygon vertices that sit almost on the line between their neighbors.
+ * These are quantization-jitter artifacts: the bezier fitter would bow through
+ * them (edges curving where they should be straight) and corner detection
+ * would flag their noisy angles as false corners (edges looking too sharp).
+ * Real corners stick out well beyond epsilon and survive.
+ */
+export function simplifyNearCollinear(points: Point[], epsilon: number): Point[] {
+  if (points.length <= 3) return points;
+  const eps = Math.max(0.25, epsilon);
+  let pts = points.slice();
+  let changed = true;
+  while (changed && pts.length > 3) {
+    changed = false;
+    const next: Point[] = [];
+    const m = pts.length;
+    for (let i = 0; i < m; i++) {
+      const prev = pts[(i - 1 + m) % m];
+      const curr = pts[i];
+      const nx = pts[(i + 1) % m];
+      const dx = nx.x - prev.x;
+      const dy = nx.y - prev.y;
+      const lenSq = dx * dx + dy * dy;
+      if (lenSq < 1e-9) continue; // duplicate point: drop
+      const dist = Math.abs(dy * (curr.x - prev.x) - dx * (curr.y - prev.y)) / Math.sqrt(lenSq);
+      if (dist < eps) {
+        changed = true;
+      } else {
+        next.push(curr);
+      }
+    }
+    if (changed) pts = next;
+  }
+  return pts;
+}
+
+/**
+ * Collapse near-straight runs onto a least-squares fitted line.
+ *
+ * Long straight edges (letter strokes, bars) keep residual 0.3-1px
+ * quantization waviness that survives polygon fitting (REACH_CAP splits long
+ * edges into segments that each carry the waviness). The bezier fitter then
+ * renders those segments slightly slanted/curved. This pass groups consecutive
+ * vertices within epsilon of a running best-fit line and replaces each run
+ * with its two projected endpoints, making long edges exactly straight.
+ * Real corners deviate from any neighboring line by far more than epsilon and
+ * break the runs.
+ */
+export function straightenRuns(points: Point[], epsilon: number): Point[] {
+  const n = points.length;
+  if (n <= 3) return points;
+  const eps = Math.max(0.35, epsilon);
+
+  const fitLine = (pts: Point[]): { cx: number; cy: number; dx: number; dy: number } => {
+    let sx = 0, sy = 0;
+    for (const p of pts) { sx += p.x; sy += p.y; }
+    const cx = sx / pts.length;
+    const cy = sy / pts.length;
+    let xx = 0, xy = 0, yy = 0;
+    for (const p of pts) {
+      const px = p.x - cx, py = p.y - cy;
+      xx += px * px; xy += px * py; yy += py * py;
+    }
+    const theta = 0.5 * Math.atan2(2 * xy, xx - yy);
+    return { cx, cy, dx: Math.cos(theta), dy: Math.sin(theta) };
+  };
+  const distToLine = (p: Point, l: { cx: number; cy: number; dx: number; dy: number }): number => {
+    const px = p.x - l.cx, py = p.y - l.cy;
+    return Math.abs(px * l.dy - py * l.dx);
+  };
+  const project = (p: Point, l: { cx: number; cy: number; dx: number; dy: number }): Point => {
+    const px = p.x - l.cx, py = p.y - l.cy;
+    const t = px * l.dx + py * l.dy;
+    return { x: l.cx + t * l.dx, y: l.cy + t * l.dy };
+  };
+
+  const result: Point[] = [];
+  let start = 0;
+  while (start < n) {
+    let end = start + 1;
+    const runPts = [points[start]];
+    let line = fitLine(runPts);
+    while (end < n && distToLine(points[end], line) <= eps) {
+      runPts.push(points[end]);
+      line = fitLine(runPts);
+      end++;
+    }
+    // Validate every run member against the final fitted line; if any drifted
+    // (the greedy grow overshot), advance by one and re-examine from there.
+    const finalLine = line;
+    if (runPts.length >= 3 && runPts.every((p) => distToLine(p, finalLine) <= eps)) {
+      result.push(project(points[start], finalLine));
+      result.push(project(points[end - 1], finalLine));
+      start = end;
+    } else {
+      result.push(points[start]);
+      start++;
+    }
+  }
+  return result;
+}
+
+/**
+ * Complete Potrace Vectorizer pipeline for a single contour loop.
+ *
+ * workingSize is the traced image's width/height; alphamax scales with it
+ * because quantization/AA jitter is proportional to working resolution -
+ * a fixed pixel tolerance chases pixel noise on large canvases (rough,
+ * over-fitted edges) while being too coarse on tiny ones.
+ */
+export function potraceFitContour(
+  contour: Point[],
+  smoothness: number,
+  cornerThresholdDeg: number,
+  workingSize: number = 0
+): string {
+  if (contour.length < 3) return '';
+
+  const baseAlpha = Math.max(0.4, 1.2 - smoothness * 0.08);
+  const sizeFactor = workingSize > 256 ? Math.min(1.4, (workingSize - 256) * 0.0012) : 0;
+  const alphamax = Math.min(2.0, baseAlpha + sizeFactor);
+
+  // Canonical rotation/orientation: adjacent layers sharing this boundary fit
+  // the identical path, so their fills abut exactly (no transparent seams).
+  const normalized = normalizeContour(contour);
+  let polygon = simplifyNearCollinear(potraceOptimalPolygon(normalized, alphamax), alphamax * 0.4);
+  // Straighten long runs onto exact lines (letter strokes stay straight),
+  // then drop any residual kinks introduced at run seams.
+  polygon = simplifyNearCollinear(straightenRuns(polygon, alphamax * 0.35), alphamax * 0.4);
+  const corners = potraceDetectCorners(polygon, cornerThresholdDeg, normalized, Math.max(0.6, alphamax * 0.5));
+  return potraceFitBezierPath(polygon, corners, smoothness, alphamax);
+}
