@@ -37,9 +37,11 @@ export function createTracerOptions(options: VectorizerOptions): ImageTracerOpti
     // is an area-style control, so scale it to the tracer's perimeter unit.
     pathomit: Math.max(0, Math.round(options.speckleFilter * 2)),
     rightangleenhance: isLogo || options.presetProfile === 'drawing',
-    // Start from a balanced generated palette. Grid sampling often chooses
-    // several black pixels from a dark logo and loses light edge shades.
-    colorsampling: 0,
+    // Let ImageTracer sample its own color palette from the image. A fixed
+    // "balanced" palette was never actually provided (the pal option stays
+    // unset), which left the tracer with no colors and crashed the layer
+    // extraction with undefined path data.
+    colorsampling: 1,
     numberofcolors: numberOfColors,
     // Small edge shades are part of the shape. Do not replace them.
     mincolorratio: 0,

@@ -59,9 +59,11 @@ export async function vectorizeWithImageTracerEngine(
         visible: true,
       });
 
-      // Format layer paths as SVG path data
+      // Format layer paths as SVG path data. ImageTracer v1.2.6's tracedata
+      // uses path OBJECTS with a .segments array (not bare node arrays).
       const svgPaths: string[] = [];
-      layerPaths.forEach((pathNodes) => {
+      layerPaths.forEach((pathObj) => {
+        const pathNodes = (pathObj && pathObj.segments) || [];
         if (pathNodes.length === 0) return;
         let d = `M ${pathNodes[0].x1} ${pathNodes[0].y1}`;
         pathNodes.forEach((node) => {

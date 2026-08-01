@@ -184,18 +184,39 @@ async function vectorizeCenterlineEngine(
   const width = imageData.width;
   const height = imageData.height;
 
-  // Convert image to binary mask for foreground strokes
+  // Convert image to a binary mask of the foreground strokes. The background
+  // is identified as the dominant color (histogram peak) - a fixed luminance
+  // threshold floods the mask on dark-background logos (everything is "dark").
   const pixelCount = width * height;
   const mask = new Uint8Array(pixelCount);
 
-  for (let i = 0; i < pixelCount; i++) {
-    const r = imageData.data[i * 4];
-    const g = imageData.data[i * 4 + 1];
-    const b = imageData.data[i * 4 + 2];
-    const a = imageData.data[i * 4 + 3];
+  // Coarse color histogram to find the background color
+  const hist = new Map<number, number>();
+  const step = Math.max(1, Math.floor(pixelCount / 20000));
+  for (let i = 0; i < pixelCount; i += step) {
+    const off = i * 4;
+    if (imageData.data[off + 3] < 128) continue;
+    const key = ((imageData.data[off] >> 4) << 8) | ((imageData.data[off + 1] >> 4) << 4) | (imageData.data[off + 2] >> 4);
+    hist.set(key, (hist.get(key) || 0) + 1);
+  }
+  let bgKey = 0, bgCount = 0;
+  hist.forEach((count, key) => {
+    if (count > bgCount) { bgCount = count; bgKey = key; }
+  });
+  const bgR = ((bgKey >> 8) & 0xF) * 17 + 8;
+  const bgG = ((bgKey >> 4) & 0xF) * 17 + 8;
+  const bgB = (bgKey & 0xF) * 17 + 8;
 
-    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-    if (a >= 128 && lum < 180) {
+  for (let i = 0; i < pixelCount; i++) {
+    const off = i * 4;
+    const r = imageData.data[off];
+    const g = imageData.data[off + 1];
+    const b = imageData.data[off + 2];
+    const a = imageData.data[off + 3];
+    if (a < 128) continue;
+    // Foreground = noticeably different from the background color
+    const dist = Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB);
+    if (dist > 60) {
       mask[i] = 1;
     }
   }
