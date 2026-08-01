@@ -514,12 +514,21 @@ export function normalizeContour(points: Point[]): Point[] {
  * would flag their noisy angles as false corners (edges looking too sharp).
  * Real corners stick out well beyond epsilon and survive.
  */
-export function simplifyNearCollinear(points: Point[], epsilon: number): Point[] {
+export function simplifyNearCollinear(
+  points: Point[],
+  epsilon: number,
+  protectedVertices: ReadonlySet<number> | null = null
+): Point[] {
   if (points.length <= 3) return points;
   const eps = Math.max(0.25, epsilon);
   let pts = points.slice();
   let changed = true;
-  while (changed && pts.length > 3) {
+  // The iterative cascade removes vertices whose LOCAL chords are within eps;
+  // on gentle curves this can accumulate and strip real features. Bound the
+  // cascade with a pass limit; the straighten stage (balance-gated) handles
+  // the long straight runs afterward.
+  let pass = 0;
+  while (changed && pts.length > 3 && pass < 6) {
     changed = false;
     const next: Point[] = [];
     const m = pts.length;
@@ -527,6 +536,11 @@ export function simplifyNearCollinear(points: Point[], epsilon: number): Point[]
       const prev = pts[(i - 1 + m) % m];
       const curr = pts[i];
       const nx = pts[(i + 1) % m];
+      // Protected vertices (pre-detected corners) always survive.
+      if (protectedVertices && protectedVertices.has(i)) {
+        next.push(curr);
+        continue;
+      }
       const dx = nx.x - prev.x;
       const dy = nx.y - prev.y;
       const lenSq = dx * dx + dy * dy;
@@ -539,6 +553,7 @@ export function simplifyNearCollinear(points: Point[], epsilon: number): Point[]
       }
     }
     if (changed) pts = next;
+    pass++;
   }
   return pts;
 }
@@ -627,6 +642,38 @@ export function straightenRuns(points: Point[], epsilon: number): Point[] {
  * a fixed pixel tolerance chases pixel noise on large canvases (rough,
  * over-fitted edges) while being too coarse on tiny ones.
  */
+/**
+ * Detect self-intersections in a polygon (segment pair crossing test with a
+ * bounding-box prefilter). O(n^2) worst case, but fast in practice.
+ */
+export function polygonSelfIntersects(points: Point[]): boolean {
+  const n = points.length;
+  if (n < 4) return false;
+  const segs = points.map((p, i) => ({
+    x0: p.x, y0: p.y,
+    x1: points[(i + 1) % n].x, y1: points[(i + 1) % n].y,
+  }));
+  const cross = (a: number[], b: number[], c: number[]) =>
+    (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0]);
+  for (let a = 0; a < n; a++) {
+    const sa = segs[a];
+    const minAx = Math.min(sa.x0, sa.x1), maxAx = Math.max(sa.x0, sa.x1);
+    const minAy = Math.min(sa.y0, sa.y1), maxAy = Math.max(sa.y0, sa.y1);
+    for (let b = a + 2; b < n; b++) {
+      if (a === 0 && b === n - 1) continue; // adjacent at the wrap
+      const sb = segs[b];
+      if (maxAx < Math.min(sb.x0, sb.x1) || minAx > Math.max(sb.x0, sb.x1)) continue;
+      if (maxAy < Math.min(sb.y0, sb.y1) || minAy > Math.max(sb.y0, sb.y1)) continue;
+      const p1 = [sa.x0, sa.y0], p2 = [sa.x1, sa.y1];
+      const p3 = [sb.x0, sb.y0], p4 = [sb.x1, sb.y1];
+      const o1 = cross(p1, p2, p3), o2 = cross(p1, p2, p4);
+      const o3 = cross(p3, p4, p1), o4 = cross(p3, p4, p2);
+      if (o1 * o2 < 0 && o3 * o4 < 0) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Smooth jitter on curved polygon runs: each non-corner vertex is replaced by
  * a weighted average of itself and its neighbors (2 iterations). Corner
@@ -731,13 +778,30 @@ export function potraceFitContour(
   // Canonical rotation/orientation: adjacent layers sharing this boundary fit
   // the identical path, so their fills abut exactly (no transparent seams).
   const normalized = normalizeContour(contour);
-  let polygon = simplifyNearCollinear(potraceOptimalPolygon(normalized, alphamax), alphamax * 0.4);
+  const rawPolygon = potraceOptimalPolygon(normalized, alphamax);
+  // Detect corners on the RAW polygon first and protect them through the
+  // simplification: the simplify's iterative cascade can otherwise strip
+  // corner/feature vertices ("some points got skipped" -> lost corners).
+  const rawCorners = potraceDetectCorners(rawPolygon, cornerThresholdDeg, normalized, Math.max(0.35, alphamax * 0.25));
+  const protectedVerts = new Set(rawCorners);
+  let polygon = simplifyNearCollinear(rawPolygon, alphamax * 0.4, protectedVerts);
   // Straighten long runs onto exact lines (letter strokes stay straight),
   // then drop any residual kinks introduced at run seams.
   polygon = simplifyNearCollinear(straightenRuns(polygon, alphamax * 0.35), alphamax * 0.4);
   const corners = potraceDetectCorners(polygon, cornerThresholdDeg, normalized, Math.max(0.35, alphamax * 0.25));
   // Remove residual jitter on curved runs (big arcs stay smooth, corners fixed,
   // vertices clamped to the contour so sparse polygons cannot shrink inward).
-  polygon = smoothCurveVertices(polygon, corners, normalized);
+  const smoothed = smoothCurveVertices(polygon, corners, normalized);
+  // Safety: the simplify/straighten/smooth stages can in rare cases push
+  // vertices across concave features, producing a self-intersecting polygon
+  // that evenodd fills XOR into huge transparent chunks. Fall back to the
+  // last provably simple stage.
+  if (!polygonSelfIntersects(smoothed)) {
+    polygon = smoothed;
+  } else if (polygonSelfIntersects(polygon)) {
+    // Extremely rare: even the post-straighten polygon is degenerate.
+    // Rebuild from the raw optimal polygon.
+    polygon = potraceOptimalPolygon(normalized, alphamax);
+  }
   return potraceFitBezierPath(polygon, corners, smoothness, alphamax);
 }
