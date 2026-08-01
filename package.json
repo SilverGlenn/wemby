@@ -13,6 +13,7 @@
   "dependencies": {
     "chroma-js": "^3.2.0",
     "imagetracerjs": "^1.2.6",
+    "jpeg-js": "^0.4.4",
     "lucide-react": "^1.28.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"

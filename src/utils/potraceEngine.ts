@@ -239,12 +239,12 @@ export function potraceDetectCorners(
     }
     // The endpoints are the polygon vertices themselves (possibly shifted by
     // straighten projections); only the INTERIOR contour points define the
-    // edge's intrinsic straightness. Short segments (tight curves' chords) are
-    // too short to demonstrate straightness - their mean deviation is trivially
-    // tiny - so they are not "straight" (the corner gate then rejects them,
-    // keeping tight curves smooth).
+    // edge's intrinsic straightness. Very short segments (tight curves' chords,
+    // 2-3 interior points) cannot demonstrate straightness and stay "not
+    // straight". Real corners with short edges (>= 4 interior points) still
+    // qualify and stay sharp.
     const interior = pts.slice(1, -1);
-    if (interior.length < 8) return { mean: Infinity, balance: 1 };
+    if (interior.length < 4) return { mean: Infinity, balance: 1 };
     let sx = 0, sy = 0;
     for (const p of interior) { sx += p.x; sy += p.y; }
     const cx = sx / interior.length, cy = sy / interior.length;
@@ -636,7 +636,10 @@ export function potraceFitContour(
   if (contour.length < 3) return '';
 
   const baseAlpha = Math.max(0.4, 1.2 - smoothness * 0.08);
-  const sizeFactor = workingSize > 256 ? Math.min(1.4, (workingSize - 256) * 0.0012) : 0;
+  // Tolerance grows gently with working resolution: enough to absorb residual
+  // quantization jitter, but not so much that polygon chords visibly flatten
+  // large arcs ("too rigid" curves).
+  const sizeFactor = workingSize > 256 ? Math.min(0.7, (workingSize - 256) * 0.0008) : 0;
   let alphamax = Math.min(2.0, baseAlpha + sizeFactor);
 
   // Thin elements (script tails, narrow strokes) cannot tolerate the full
