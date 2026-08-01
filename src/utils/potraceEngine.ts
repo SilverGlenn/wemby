@@ -620,42 +620,6 @@ export function straightenRuns(points: Point[], epsilon: number): Point[] {
 }
 
 /**
- * Smooth jitter on curved polygon runs: each non-corner vertex is replaced by
- * a weighted average of itself and its neighbors (2 iterations). Corner
- * vertices stay fixed, so sharp corners are untouched. This removes the
- * residual boundary jitter that survives the polygon fit on large arcs
- * ("rough edges" on big curves) without flattening the arc's curvature.
- */
-export function smoothCurveVertices(points: Point[], cornerIndices: number[]): Point[] {
-  const n = points.length;
-  if (n <= 4) return points;
-  const isCorner = new Uint8Array(n);
-  for (const idx of cornerIndices) isCorner[idx] = 1;
-
-  let pts = points.slice();
-  for (let iter = 0; iter < 2; iter++) {
-    const next = pts.slice();
-    for (let i = 0; i < n; i++) {
-      if (isCorner[i]) continue;
-      const prev = pts[(i - 1 + n) % n];
-      const curr = pts[i];
-      const nx = pts[(i + 1) % n];
-      // Skip averaging across a corner (keeps corner-adjacent edges crisp).
-      const wPrev = isCorner[(i - 1 + n) % n] ? 0 : 0.25;
-      const wNext = isCorner[(i + 1) % n] ? 0 : 0.25;
-      const wSelf = 1 - wPrev - wNext;
-      const denom = wPrev + wSelf + wNext;
-      next[i] = {
-        x: (wPrev * prev.x + wSelf * curr.x + wNext * nx.x) / denom,
-        y: (wPrev * prev.y + wSelf * curr.y + wNext * nx.y) / denom,
-      };
-    }
-    pts = next;
-  }
-  return pts;
-}
-
-/**
  * Complete Potrace Vectorizer pipeline for a single contour loop.
  *
  * workingSize is the traced image's width/height; alphamax scales with it
@@ -702,7 +666,5 @@ export function potraceFitContour(
   // then drop any residual kinks introduced at run seams.
   polygon = simplifyNearCollinear(straightenRuns(polygon, alphamax * 0.35), alphamax * 0.4);
   const corners = potraceDetectCorners(polygon, cornerThresholdDeg, normalized, Math.max(0.35, alphamax * 0.25));
-  // Remove residual jitter on curved runs (big arcs stay smooth, corners fixed).
-  polygon = smoothCurveVertices(polygon, corners);
   return potraceFitBezierPath(polygon, corners, smoothness, alphamax);
 }
