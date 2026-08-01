@@ -596,8 +596,18 @@ export function straightenRuns(points: Point[], epsilon: number): Point[] {
     }
     // Validate every run member against the final fitted line; if any drifted
     // (the greedy grow overshot), advance by one and re-examine from there.
+    // Also require the residuals to be BALANCED (jitter alternates around the
+    // line, balance ~ 0). A gentle curve's points bow consistently to one side
+    // (balance ~ 1): collapsing it would flatten the curve into rigid chords.
     const finalLine = line;
-    if (runPts.length >= 3 && runPts.every((p) => distToLine(p, finalLine) <= eps)) {
+    let signedSum = 0, absSum = 0;
+    for (const p of runPts) {
+      const d = (p.x - finalLine.cx) * finalLine.dy - (p.y - finalLine.cy) * finalLine.dx;
+      signedSum += d;
+      absSum += Math.abs(d);
+    }
+    const balance = absSum > 1e-9 ? Math.abs(signedSum) / absSum : 0;
+    if (runPts.length >= 3 && balance < 0.55 && runPts.every((p) => distToLine(p, finalLine) <= eps)) {
       result.push(project(points[start], finalLine));
       result.push(project(points[end - 1], finalLine));
       start = end;

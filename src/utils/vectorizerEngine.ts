@@ -124,7 +124,10 @@ export function renderSvgFromLayers(
   geometryMode: 'filled' | 'stroked' = 'filled',
   strokeWidth: number = 2
 ): string {
-  const overlapStrokeWidth = Math.max(1.6, strokeWidth * 0.2);
+  // Under-strokes cover sub-pixel AA seams at shared boundaries. Keep them
+  // narrow: wider strokes bulge visibly past corners (round line-joins look
+  // like paint-brush blobs on sharp corners).
+  const overlapStrokeWidth = Math.max(1.0, strokeWidth * 0.2);
 
   const visibleLayers = layers.filter((layer) => swatchVisibilityMap.get(layer.colorId) ?? true);
 
