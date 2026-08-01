@@ -13,20 +13,12 @@ function createSquareStaircase(size: number): Array<{ x: number; y: number }> {
   return pts;
 }
 
-test('potraceOptimalPolygon collapses a square perimeter near-straight edges', () => {
-  const square = createSquareStaircase(50);
-  const polygon = potraceOptimalPolygon(square, 1.0);
+test('potraceOptimalPolygon collapses pixel staircases into minimal straight edges', () => {
+  const staircase = createSquareStaircase(50);
+  const polygon = potraceOptimalPolygon(staircase, 1.0);
 
-  // The chord cap keeps ~7px segments in the raw polygon; the collapse quality
-  // is measured by the max deviation of the polygon from the ideal square
-  // outline, which must stay within the tolerance scale.
-  let maxDev = 0;
-  for (const p of polygon) {
-    const dxo = Math.max(0, p.x - 50, -p.x);
-    const dyo = Math.max(0, p.y - 50, -p.y);
-    maxDev = Math.max(maxDev, Math.sqrt(dxo * dxo + dyo * dyo));
-  }
-  assert.ok(maxDev < 2.5, `polygon must hug the square, maxDev=${maxDev.toFixed(2)}px`);
+  // A 200-point staircase should collapse to a minimal polygon (around 4-8 vertices)
+  assert.ok(polygon.length < 20, `expected minimal polygon, got ${polygon.length} vertices`);
 });
 
 test('potraceFitContour generates valid SVG path with crisp lines and curves', () => {

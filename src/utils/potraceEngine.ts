@@ -107,13 +107,6 @@ export function potraceOptimalPolygon(
   const REACH_CAP = 128;
   const alphamaxSq = alphamax * alphamax;
 
-  // CHORD_CAP: limit how far a single chord may span, so curved regions keep
-  // dense vertices (curvy curves). The tolerance alone allows chords up to
-  // sqrt(8*r*alphamax) on a curve of radius r - on tight letterform curves
-  // that is still a large fraction of the bend. Short chords leave the curves
-  // dense; straight runs are collapsed later by straightenRuns regardless.
-  const CHORD_CAP = Math.max(6, 7 * alphamax);
-
   // Compute straight-line segment validity matrix for pairs (i, j)
   // Segment (i, j) is valid if all intermediate contour points lie within alphamax distance of line (i, j)
   const isStraightValid = (i: number, j: number): boolean => {
@@ -136,30 +129,6 @@ export function potraceOptimalPolygon(
       const p = contour[(i + k) % n];
       const cross = dy * p.x - dx * p.y + crossConst;
       if (cross * cross > tolSq) return false;
-      // A chord may not jump across an ISOLATED sharp local turn: a contour
-      // point with a large local angle whose neighbors are straight (a real
-      // corner) must remain a polygon vertex, otherwise the greedy walk skips
-      // it ("lost corners"). Staircase jitter also has sharp local steps, but
-      // there the adjacent turns are sharp too, so the chord may span them
-      // (deviation stays within alphamax) and the balance-gated straighten
-      // collapses them later.
-      const localTurn = (idx: number): number => {
-        const prevP = contour[((idx - 1) % n + n) % n];
-        const nextP = contour[((idx + 1) % n) % n];
-        const v1x = p.x - prevP.x, v1y = p.y - prevP.y;
-        const v2x = nextP.x - p.x, v2y = nextP.y - p.y;
-        const l1 = Math.hypot(v1x, v1y), l2 = Math.hypot(v2x, v2y);
-        if (l1 < 1e-6 || l2 < 1e-6) return 0;
-        const dot = Math.max(-1, Math.min(1, (v1x * v2x + v1y * v2y) / (l1 * l2)));
-        return Math.acos(dot);
-      };
-      const kIdx = (i + k) % n;
-      const turn = localTurn(kIdx);
-      if (turn > 0.7) {
-        const prevTurn = localTurn(((kIdx - 1) % n + n) % n);
-        const nextTurn = localTurn((kIdx + 1) % n);
-        if (prevTurn < 0.25 && nextTurn < 0.25) return false;
-      }
     }
     return true;
   };
@@ -170,11 +139,6 @@ export function potraceOptimalPolygon(
   for (let i = 0; i < n; i++) {
     let r = 1;
     while (r <= maxScan && isStraightValid(i, (i + r) % n)) {
-      const p1 = contour[i];
-      const p2 = contour[(i + r) % n];
-      const dx = p2.x - p1.x;
-      const dy = p2.y - p1.y;
-      if (dx * dx + dy * dy > CHORD_CAP * CHORD_CAP) break;
       r++;
     }
     longestReach[i] = Math.min(r - 1, maxScan);
@@ -352,13 +316,14 @@ export function potraceDetectCorners(
         const dot = Math.max(-1, Math.min(1, (v1x * v2x + v1y * v2y) / (l1 * l2)));
         return Math.acos(dot) * 180 / Math.PI;
       };
-      // Use the vertex's OWN local turn (window w around its mapped contour
-      // index): the window covers 1-3px straighten projections, while run-end
-      // extras clustered several px from the true corner stay below the
-      // threshold and are not mistaken for corners.
-      const t = localTurn(k);
+      let best = 0;
+      for (let dj = -4; dj <= 4; dj++) {
+        const j = ((k + dj) % n + n) % n;
+        const t = localTurn(j);
+        if (t > best) best = t;
+      }
       // localTurn returns degrees; the threshold is in radians.
-      angle = t * Math.PI / 180;
+      angle = best * Math.PI / 180;
     } else {
       const dotProd = Math.max(-1, Math.min(1, (v1x * v2x + v1y * v2y) / (len1 * len2)));
       angle = Math.acos(dotProd);
@@ -505,24 +470,8 @@ export function potraceFitBezierPath(
  * fit the IDENTICAL path, so adjacent fills abut exactly with no seam gap.
  */
 export function normalizeContour(points: Point[]): Point[] {
-  let n = points.length;
+  const n = points.length;
   if (n <= 2) return points;
-
-  // Drop consecutive duplicate points: boundary walks can emit the same
-  // corner vertex twice, which breaks local-angle computations (zero-length
-  // segments) and lets the polygon reach jump across real corners.
-  {
-    const deduped: Point[] = [];
-    for (let i = 0; i < n; i++) {
-      const p = points[i];
-      const prev = points[(i - 1 + n) % n];
-      if (p.x !== prev.x || p.y !== prev.y) deduped.push(p);
-    }
-    if (deduped.length >= 3 && deduped.length < n) {
-      points = deduped;
-      n = deduped.length;
-    }
-  }
 
   let best = 0;
   for (let i = 1; i < n; i++) {
@@ -584,25 +533,7 @@ export function simplifyNearCollinear(points: Point[], epsilon: number): Point[]
       if (lenSq < 1e-9) continue; // duplicate point: drop
       const dist = Math.abs(dy * (curr.x - prev.x) - dx * (curr.y - prev.y)) / Math.sqrt(lenSq);
       if (dist < eps) {
-        // Balance gate: only remove if the local 5-point window deviates from
-        // the chord in an alternating (jitter) pattern. A curve's vertices all
-        // bow to one side (balance ~1) and must survive - with dense polygons
-        // (small chords), every vertex is within eps of its neighbors' chord,
-        // and an ungated cascade would strip entire circles.
-        let signedSum = 0, absSum = 0;
-        for (let dj = -2; dj <= 2; dj++) {
-          if (dj === 0) continue;
-          const q = pts[(((i + dj) % m) + m) % m];
-          const d = dy * (q.x - prev.x) - dx * (q.y - prev.y);
-          signedSum += d;
-          absSum += Math.abs(d);
-        }
-        const balance = absSum > 1e-9 ? Math.abs(signedSum) / absSum : 0;
-        if (balance < 0.6) {
-          changed = true;
-        } else {
-          next.push(curr);
-        }
+        changed = true;
       } else {
         next.push(curr);
       }
@@ -705,7 +636,7 @@ export function potraceFitContour(
   if (contour.length < 3) return '';
 
   const baseAlpha = Math.max(0.4, 1.2 - smoothness * 0.08);
-  const sizeFactor = workingSize > 256 ? Math.min(0.9, (workingSize - 256) * 0.0008) : 0;
+  const sizeFactor = workingSize > 256 ? Math.min(1.4, (workingSize - 256) * 0.0012) : 0;
   let alphamax = Math.min(2.0, baseAlpha + sizeFactor);
 
   // Thin elements (script tails, narrow strokes) cannot tolerate the full
