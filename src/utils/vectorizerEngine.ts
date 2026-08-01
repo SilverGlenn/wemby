@@ -317,9 +317,10 @@ export async function vectorizeWithPotraceEngine(
   indexedPixels = merged.indexedPixels;
 
   // Second pass: straighten the 1-2px quantization jitter along the now-clean
-  // color boundaries (rough edges from anti-aliased upscaling). Legit 1px+
-  // features survive (they have >= 3 same-color pixels in their 3x3 window).
-  smoothIndexedEdges(indexedPixels, width, height, 2);
+  // color boundaries. Only ONE pass here: each pass erodes ~1px off every thin
+  // tip/end (script tails, stroke terminals), and the polygon fit absorbs the
+  // residual sub-pixel jitter.
+  smoothIndexedEdges(indexedPixels, width, height, 1);
 
   const totalPixels = width * height;
   const colorCounts = new Array(palette.length).fill(0);

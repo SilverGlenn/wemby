@@ -221,14 +221,15 @@ export function potraceDetectCorners(
   }
 
   // Intrinsic straightness of the contour segment between polygon vertices a
-  // and b: fit a line through the segment's own points and measure their max
-  // deviation from it. ~0 for a straight edge (even if the polygon chord is
-  // slanted by straighten projections), ~alphamax for a curved segment.
-  const edgeDev = (a: number, b: number): number => {
-    if (!contour || !contourIdx) return 0;
+  // and b: fit a line through the segment's own points. Returns the mean
+  // absolute deviation (jitter = sparse outliers = tiny mean; a curve bows
+  // consistently = large mean) and the signed-deviation balance (a curve's
+  // points all sit on ONE side of the line ~1.0; jitter alternates ~0).
+  const edgeDev = (a: number, b: number): { mean: number; balance: number } => {
+    if (!contour || !contourIdx) return { mean: 0, balance: 0 };
     const cA = contourIdx[a];
     const cB = contourIdx[b];
-    if (cA === cB) return 0;
+    if (cA === cB) return { mean: 0, balance: 0 };
     const pts: Point[] = [];
     let k = cA;
     while (true) {
@@ -243,7 +244,7 @@ export function potraceDetectCorners(
     // tiny - so they are not "straight" (the corner gate then rejects them,
     // keeping tight curves smooth).
     const interior = pts.slice(1, -1);
-    if (interior.length < 8) return Infinity;
+    if (interior.length < 8) return { mean: Infinity, balance: 1 };
     let sx = 0, sy = 0;
     for (const p of interior) { sx += p.x; sy += p.y; }
     const cx = sx / interior.length, cy = sy / interior.length;
@@ -254,25 +255,26 @@ export function potraceDetectCorners(
     }
     const theta = 0.5 * Math.atan2(2 * xy, xx - yy);
     const dx = Math.cos(theta), dy = Math.sin(theta);
-    // MEAN absolute deviation: quantization jitter on a straight edge is a few
-    // sparse outliers (tiny mean), while a curved segment bows consistently
-    // (mean ~ half the sagitta). The max alone cannot separate the two.
-    let sumD = 0;
+    let sumAbs = 0, sumSigned = 0;
     for (const p of interior) {
-      sumD += Math.abs((p.x - cx) * dy - (p.y - cy) * dx);
+      const d = (p.x - cx) * dy - (p.y - cy) * dx;
+      sumAbs += Math.abs(d);
+      sumSigned += d;
     }
-    return sumD / interior.length;
+    const mean = sumAbs / interior.length;
+    const balance = sumAbs > 1e-9 ? Math.abs(sumSigned) / sumAbs : 0;
+    return { mean, balance };
   };
 
   for (let i = 0; i < len; i++) {
     // Skip degenerate neighbor edges (e.g. the polygon's tiny wrap-closing edge
     // whose interior is empty) by stepping outward until a real edge is found.
     let prevIdx = (i - 1 + len) % len;
-    for (let step = 0; step < 4 && edgeDev(prevIdx, i) === Infinity; step++) {
+    for (let step = 0; step < 4 && !isFinite(edgeDev(prevIdx, i).mean); step++) {
       prevIdx = (prevIdx - 1 + len) % len;
     }
     let nextIdx = (i + 1) % len;
-    for (let step = 0; step < 4 && edgeDev(i, nextIdx) === Infinity; step++) {
+    for (let step = 0; step < 4 && !isFinite(edgeDev(i, nextIdx).mean); step++) {
       nextIdx = (nextIdx + 1) % len;
     }
     const prev = points[prevIdx];
@@ -292,57 +294,36 @@ export function potraceDetectCorners(
       continue;
     }
 
-    // Compute the turn angle from the CONTOUR's local tangents (when the
-    // contour is available) rather than the polygon chords. A fillet's arc
-    // join is tangent-continuous: its first chord tilts ~85 deg from the
-    // edge (marking a false corner), but the contour tangents meet at ~0 deg
-    // (smooth, not a corner). Real corners and chamfers are tangent-
-    // discontinuous and keep their true angles.
+    // Compute the turn angle from the CONTOUR's LOCAL tangents: a real corner's
+    // direction change is concentrated at one point (the local 2-3px angle
+    // equals the full corner angle), while a curve's change is gradual (the
+    // local angle is a few degrees regardless of radius). The polygon vertex can
+    // sit 1-2px off the true corner (straighten projections), so take the max
+    // local angle over a small neighborhood around the vertex's contour index.
     let angle: number;
     if (contour && contourIdx) {
       const k = contourIdx[i];
       const n = contour.length;
-      // Measure the edge directions in windows SKIP..SKIP+W contour points away
-      // from the vertex. The polygon vertex can sit 1-2px off the true corner
-      // (straighten projections), so an adjacent window would lie entirely on
-      // one edge and report 0 deg. Skipping the corner neighborhood keeps the
-      // windows on each edge proper. Windows shrink for tiny contours.
-      const SKIP = Math.max(1, Math.min(8, Math.floor(n / 12)));
-      const W = Math.max(2, Math.min(8, Math.floor(n / 12)));
-      const fitDir = (from: number, to: number): { dx: number; dy: number } => {
-        // least-squares direction of contour[from..to] (cyclic)
-        const pts: Point[] = [];
-        let idx = from;
-        while (true) {
-          pts.push(contour[((idx % n) + n) % n]);
-          if (idx === to) break;
-          idx = idx < to ? idx + 1 : idx - 1;
-        }
-        let sx = 0, sy = 0;
-        for (const p of pts) { sx += p.x; sy += p.y; }
-        const cx = sx / pts.length, cy = sy / pts.length;
-        let xx = 0, xy = 0, yy = 0;
-        for (const p of pts) {
-          const px = p.x - cx, py = p.y - cy;
-          xx += px * px; xy += px * py; yy += py * py;
-        }
-        const theta = 0.5 * Math.atan2(2 * xy, xx - yy);
-        return { dx: Math.cos(theta), dy: Math.sin(theta) };
+      const w = Math.max(1, Math.min(3, Math.floor(n / 40)));
+      const localTurn = (j: number): number => {
+        const p0 = contour[((j - w) % n + n) % n];
+        const p1 = contour[j];
+        const p2 = contour[(j + w) % n];
+        const v1x = p1.x - p0.x, v1y = p1.y - p0.y;
+        const v2x = p2.x - p1.x, v2y = p2.y - p1.y;
+        const l1 = Math.hypot(v1x, v1y), l2 = Math.hypot(v2x, v2y);
+        if (l1 < 1e-9 || l2 < 1e-9) return 0;
+        const dot = Math.max(-1, Math.min(1, (v1x * v2x + v1y * v2y) / (l1 * l2)));
+        return Math.acos(dot) * 180 / Math.PI;
       };
-      const inDir = fitDir(k - (SKIP + W), k - SKIP);
-      const outDir = fitDir(k + SKIP, k + SKIP + W);
-      // Orient both by the travel direction (contour walks CCW after
-      // normalization) so sharp tips measure the full turn, not the acute
-      // complement.
-      const travel = (dx: number, dy: number, from: number, to: number) => {
-        const p1 = contour[((from % n) + n) % n];
-        const p2 = contour[((to % n) + n) % n];
-        return (p2.x - p1.x) * dx + (p2.y - p1.y) * dy >= 0 ? 1 : -1;
-      };
-      const inSign = travel(inDir.dx, inDir.dy, k - (SKIP + W), k - SKIP);
-      const outSign = travel(outDir.dx, outDir.dy, k + SKIP, k + SKIP + W);
-      const d = Math.max(-1, Math.min(1, inSign * outSign * (inDir.dx * outDir.dx + inDir.dy * outDir.dy)));
-      angle = Math.acos(d);
+      let best = 0;
+      for (let dj = -4; dj <= 4; dj++) {
+        const j = ((k + dj) % n + n) % n;
+        const t = localTurn(j);
+        if (t > best) best = t;
+      }
+      // localTurn returns degrees; the threshold is in radians.
+      angle = best * Math.PI / 180;
     } else {
       const dotProd = Math.max(-1, Math.min(1, (v1x * v2x + v1y * v2y) / (len1 * len2)));
       angle = Math.acos(dotProd);
@@ -350,10 +331,15 @@ export function potraceDetectCorners(
 
     if (angle >= minAngleRad) {
       if (contourIdx) {
-        // Real corners connect two straight edges.
+        // Real corners connect two straight edges: low mean deviation AND the
+        // deviations must not all fall on one side (a curve bows consistently,
+        // jitter alternates).
         const devPrev = edgeDev(prevIdx, i);
         const devNext = edgeDev(i, nextIdx);
-        if (devPrev < straightTol && devNext < straightTol) {
+        if (
+          devPrev.mean < straightTol && devNext.mean < straightTol &&
+          devPrev.balance < 0.6 && devNext.balance < 0.6
+        ) {
           cornerIndices.push(i);
         }
       } else {
@@ -394,24 +380,6 @@ export function potraceFitBezierPath(
     isCorner[idx] = 1;
   }
 
-  // Precompute each corner's turn angle: segments adjacent to SHARP corners
-  // (turn >= 60 deg) render as straight lines so the corner cannot be rounded
-  // by the curve's bow toward it (a chord tangent at the far endpoint points
-  // across the corner). Moderate corners (45-60 deg) keep a tight curve.
-  const cornerTurn = new Float64Array(len);
-  for (const idx of cornerIndices) {
-    const prev = points[(idx - 1 + len) % len];
-    const curr = points[idx];
-    const next = points[(idx + 1) % len];
-    const v1x = curr.x - prev.x, v1y = curr.y - prev.y;
-    const v2x = next.x - curr.x, v2y = next.y - curr.y;
-    const l1 = Math.hypot(v1x, v1y), l2 = Math.hypot(v2x, v2y);
-    if (l1 > 0.01 && l2 > 0.01) {
-      const dot = Math.max(-1, Math.min(1, (v1x * v2x + v1y * v2y) / (l1 * l2)));
-      cornerTurn[idx] = Math.acos(dot) * 180 / Math.PI;
-    }
-  }
-
   let d = `M ${format(points[0].x)} ${format(points[0].y)}`;
 
   // Handle tension factor: reduced when either endpoint is a corner so the
@@ -427,10 +395,10 @@ export function potraceFitBezierPath(
 
     if (segLen < 0.01) continue;
 
-    // If both endpoints are sharp corners, or either endpoint is a SHARP
-    // corner (turn >= 60 deg), draw a straight line segment so the corner
-    // stays perfectly sharp (a curve would bow toward it and round it).
-    if ((isCorner[i] && isCorner[nextIdx]) || cornerTurn[i] >= 60 || cornerTurn[nextIdx] >= 60) {
+    // Any segment adjacent to a DETECTED corner renders as a straight line:
+    // the contour-aware gate guarantees only real corners are detected, so the
+    // corner stays exactly sharp (a curve would bow toward it and round it).
+    if (isCorner[i] || isCorner[nextIdx]) {
       d += ` L ${format(p2.x)} ${format(p2.y)}`;
     } else {
       const cornerAdjacent = isCorner[i] || isCorner[nextIdx];
@@ -659,7 +627,23 @@ export function potraceFitContour(
 
   const baseAlpha = Math.max(0.4, 1.2 - smoothness * 0.08);
   const sizeFactor = workingSize > 256 ? Math.min(1.4, (workingSize - 256) * 0.0012) : 0;
-  const alphamax = Math.min(2.0, baseAlpha + sizeFactor);
+  let alphamax = Math.min(2.0, baseAlpha + sizeFactor);
+
+  // Thin elements (script tails, narrow strokes) cannot tolerate the full
+  // size-scaled tolerance: the fit's chords could cut across the stroke or
+  // collapse its fill. Cap the tolerance by the contour's narrowest bbox
+  // dimension.
+  {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const p of contour) {
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+    const minDim = Math.min(maxX - minX, maxY - minY);
+    alphamax = Math.min(alphamax, Math.max(0.6, minDim * 0.12));
+  }
 
   // Canonical rotation/orientation: adjacent layers sharing this boundary fit
   // the identical path, so their fills abut exactly (no transparent seams).

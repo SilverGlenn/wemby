@@ -23,7 +23,7 @@ const DEFAULT_OPTIONS: VectorizerOptions = {
   maxColors: 16,
   speckleFilter: 8,
   smoothness: 7,
-  cornerThreshold: 45,
+  cornerThreshold: 35,
   pathOverlap: true,
   upscale: true,
   upscaleMinDimension: 1024,

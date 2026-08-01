@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { potraceFitContour, potraceDetectCorners, normalizeContour, potraceOptimalPolygon, simplifyNearCollinear, straightenRuns } from '../src/utils/potraceEngine.ts';
 
-const fit = (pts) => potraceFitContour(pts, 7, 45, 1024);
+const fit = (pts) => potraceFitContour(pts, 7, 35, 1024);
 
 // Polygon stages exactly as potraceFitContour runs them (simplify + straighten
 // remove mid-edge reach-cap artifacts before corner detection).
@@ -85,7 +85,7 @@ test('corner detection is contour-aware: real corners yes, smooth joins no', () 
   for (let x = 818; x >= 205; x--) sq.push({ x, y: 819 });
   for (let y = 818; y >= 206; y--) sq.push({ x: 205, y });
   const { poly: sqPoly, norm: sqNorm } = fitPolygon(sq);
-  assert.ok(potraceDetectCorners(sqPoly, 45, sqNorm, 0.39).length >= 4, 'square corners must be detected');
+  assert.ok(potraceDetectCorners(sqPoly, 35, sqNorm, 0.39).length >= 4, 'square corners must be detected');
 
   // Fillet-style smooth join: an arc between two straight edges must NOT
   // produce a corner at the join (tangent-continuous). The contour is closed
@@ -99,7 +99,7 @@ test('corner detection is contour-aware: real corners yes, smooth joins no', () 
   for (let y = 0; y <= 100; y++) fillet.push({ x: 140, y });
   for (let x = 139; x >= 0; x--) fillet.push({ x, y: 100 });
   const { poly: fPoly, norm: fNorm } = fitPolygon(fillet);
-  const fCorners = potraceDetectCorners(fPoly, 45, fNorm, 0.39);
+  const fCorners = potraceDetectCorners(fPoly, 35, fNorm, 0.39);
   // Only the shape's two real outer corners may be detected; the smooth
   // arc joins must not be.
   const joins = fCorners.filter((i) => {
@@ -115,7 +115,7 @@ test('potraceFitContour output for a sharp square is geometrically accurate', ()
   for (let y = 0; y <= 200; y++) sq.push({ x: 200, y });
   for (let x = 200; x >= 0; x--) sq.push({ x, y: 200 });
   for (let y = 200; y >= 0; y--) sq.push({ x: 0, y });
-  const d = potraceFitContour(sq, 7, 45, 1024);
+  const d = potraceFitContour(sq, 7, 35, 1024);
   // All four corners must appear as path points (sharp, not rounded off)
   const toks = d.match(/[MLCZ]|[-+]?\d*\.?\d+/g) || [];
   const pts = [];
