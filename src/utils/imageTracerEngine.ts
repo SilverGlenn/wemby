@@ -23,7 +23,10 @@ export async function vectorizeWithImageTracerEngine(
 
   const tracer = ImageTracer as unknown as {
     imagedataToSVG: (data: ImageData, options?: unknown) => string;
-    imagedataToTracedata: (data: ImageData, options?: unknown) => { palette?: Array<{ r: number; g: number; b: number; a: number }>; layers?: unknown };
+    imagedataToTracedata: (data: ImageData, options?: unknown) => {
+      palette?: Array<{ r: number; g: number; b: number; a: number }>;
+      layers?: Array<Array<{ segments: Array<{ type: string; x1: number; y1: number; x2?: number; y2?: number; x3?: number; y3?: number }> }>>;
+    };
   };
 
   const svgString = tracer.imagedataToSVG(imgData, tracerOptions);
@@ -37,7 +40,7 @@ export async function vectorizeWithImageTracerEngine(
 
   if (tracerData && tracerData.palette) {
     const palette = tracerData.palette;
-    const layersData = (tracerData.layers || []) as Array<Array<Array<{ type: string; x1: number; y1: number; x2?: number; y2?: number; x3?: number; y3?: number }>>>;
+    const layersData = tracerData.layers || [];
 
 
     const totalPixels = width * height;
@@ -63,7 +66,7 @@ export async function vectorizeWithImageTracerEngine(
       // uses path OBJECTS with a .segments array (not bare node arrays).
       const svgPaths: string[] = [];
       layerPaths.forEach((pathObj) => {
-        const pathNodes = (pathObj && pathObj.segments) || [];
+        const pathNodes = pathObj ? pathObj.segments : [];
         if (pathNodes.length === 0) return;
         let d = `M ${pathNodes[0].x1} ${pathNodes[0].y1}`;
         pathNodes.forEach((node) => {
