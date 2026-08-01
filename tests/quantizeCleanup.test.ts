@@ -30,24 +30,10 @@ test('groupCompoundPaths punches holes only when fully contained', () => {  cons
   const result = groupCompoundPaths([outer, hole, edgeHugger]);
 
   assert.equal(result.length, 2, 'outer+hole compound and standalone edge contour');
-  const subpathCount = (d) => (d.match(/M /g) || []).length;
-  const bbox = (d) => {
-    const nums = d.match(/-?\d+(\.\d+)?/g) || [];
-    let a = 1e9, b = 1e9, c = -1, e = -1;
-    for (let k = 0; k + 1 < nums.length; k += 2) {
-      a = Math.min(a, +nums[k]); b = Math.min(b, +nums[k + 1]);
-      c = Math.max(c, +nums[k]); e = Math.max(e, +nums[k + 1]);
-    }
-    return [a, b, c, e];
-  };
-  const compound = result.find((d) => subpathCount(d) === 2)!;
-  const standalone = result.find((d) => subpathCount(d) === 1 && !d.startsWith('M 0 0'))!;
-  assert.ok(compound, 'outer+hole compound exists');
-  const [ax, ay] = bbox(compound);
-  assert.ok(ax < 40 || ay < 40, 'compound starts with the outer');
-  assert.ok(standalone, 'edge-hugging contour stays standalone');
-  const [sx] = bbox(standalone);
-  assert.ok(sx > 90, 'standalone is the edge-hugging contour');
+  const compound = result.find((d) => d.includes('M 0 0'))!;
+  const standalone = result.find((d) => d.includes('M 95 40'))!;
+  assert.ok(compound.includes('M 40 40'), 'hole should be punched into the outer path');
+  assert.ok(!standalone.includes('M 40 40'), 'edge-hugging contour must stay standalone');
 });
 
 test('smoothIndexedEdges removes 1px boundary bumps but keeps 1px line interiors', () => {
@@ -156,22 +142,13 @@ test('groupCompoundPaths keeps islands inside holes as filled (donut center)', (
 
   const result = groupCompoundPaths([bg, ring, island]);
 
-  const subpathCount = (d) => (d.match(/M /g) || []).length;
-  const hasBbox = (d, x0, y0, x1, y1) => {
-    const nums = d.match(/-?\d+(\.\d+)?/g) || [];
-    for (let k = 0; k + 1 < nums.length; k += 2) {
-      const px = +nums[k], py = +nums[k + 1];
-      if (px >= x0 && px <= x1 && py >= y0 && py <= y1) return true;
-    }
-    return false;
-  };
-
-  const islandCompound = result.find((d) => subpathCount(d) === 1 && hasBbox(d, 80, 80, 120, 120));
-  const bgCompound = result.find((d) => subpathCount(d) === 2 && hasBbox(d, 0, 0, 10, 10));
+  const islandCompound = result.find((d) => d.includes('M 80 80'));
+  const bgCompound = result.find((d) => d.startsWith('M 0 0'));
 
   assert.ok(islandCompound, 'island must render as its own filled compound');
-  assert.ok(bgCompound, 'bg compound with ring hole exists');
-  assert.ok(hasBbox(bgCompound, 40, 40, 160, 160), 'ring hole must be punched from the background');
+  assert.ok(!islandCompound.includes('M 40 40'), 'island must not be grouped with the ring hole');
+  assert.ok(bgCompound && bgCompound.includes('M 40 40'), 'ring hole must be punched from the background');
+  assert.ok(bgCompound && !bgCompound.includes('M 80 80'), 'island must not be punched out of the background');
 });
 
 test('straightenRuns absorbs sub-epsilon waviness into exact straight lines', () => {

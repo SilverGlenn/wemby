@@ -111,7 +111,7 @@ function removeSpeckles(
 }
 
 /**
- * Render SVG string with fill-rule="nonzero" subpath hole subtraction & stroked layer support.
+ * Render SVG string with fill-rule="evenodd" subpath hole subtraction & stroked layer support.
  * Path overlap stroke prevents transparent white hairline seam artifacts between color regions.
  */
 export function renderSvgFromLayers(
@@ -165,7 +165,7 @@ export function renderSvgFromLayers(
     const compoundPaths = layer.svgPaths.filter(Boolean);
     if (compoundPaths.length === 0) return [];
     const paths = compoundPaths
-      .map((d) => `    <path d="${d}" fill="${currentHex}" fill-rule="nonzero"/>`)
+      .map((d) => `    <path d="${d}" fill="${currentHex}" fill-rule="evenodd"/>`)
       .join('\n');
     return [`  <g id="layer-${layer.colorId}">\n${paths}\n  </g>`];
   });
@@ -444,7 +444,7 @@ export async function vectorizeWithPotraceEngine(
       }
     }
 
-    // Topological hole subtraction with fill-rule="nonzero"
+    // Topological hole subtraction with fill-rule="evenodd"
     const compoundSvgPaths = groupCompoundPaths(contoursWithPaths);
 
     totalPaths += compoundSvgPaths.length;
