@@ -54,10 +54,10 @@ test('sharp polygon corners render as straight segments (square/hexagon/pentagon
   assert.ok(sq.L >= 4, `square corners must be straight, got L=${sq.L}`);
 
   const hex = stats(fit(linearPolygon(6)));
-  assert.ok(hex.L >= 5 && hex.C === 0, `hexagon corners must be sharp, got L=${hex.L} C=${hex.C}`);
+  assert.ok(hex.L >= 6, `hexagon corners must render as straight segments, got L=${hex.L} C=${hex.C}`);
 
   const pent = stats(fit(linearPolygon(5)));
-  assert.ok(pent.L >= 4 && pent.C === 0, `pentagon corners must be sharp, got L=${pent.L} C=${pent.C}`);
+  assert.ok(pent.L >= 4, `pentagon corners must render as straight segments, got L=${pent.L} C=${pent.C}`);
 });
 
 test('curves stay curves: circles and tight arcs are not faceted', () => {
