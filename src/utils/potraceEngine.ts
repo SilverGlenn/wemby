@@ -220,35 +220,64 @@ export function potraceDetectCorners(
     }
   }
 
-  // Max perpendicular deviation of the contour points between polygon vertices
-  // a and b from the chord (a->b). ~0 for straight edges, ~alphamax for curves.
+  // Intrinsic straightness of the contour segment between polygon vertices a
+  // and b: fit a line through the segment's own points and measure their max
+  // deviation from it. ~0 for a straight edge (even if the polygon chord is
+  // slanted by straighten projections), ~alphamax for a curved segment.
   const edgeDev = (a: number, b: number): number => {
     if (!contour || !contourIdx) return 0;
     const cA = contourIdx[a];
     const cB = contourIdx[b];
     if (cA === cB) return 0;
-    const pA = points[a];
-    const pB = points[b];
-    const dx = pB.x - pA.x;
-    const dy = pB.y - pA.y;
-    const lenSq = dx * dx + dy * dy;
-    if (lenSq < 1e-9) return 0;
-    const invLen = 1 / Math.sqrt(lenSq);
-    let maxD = 0;
-    let k = (cA + 1) % contour.length;
-    while (k !== cB) {
-      const p = contour[k];
-      const d = Math.abs(dy * (p.x - pA.x) - dx * (p.y - pA.y)) * invLen;
-      if (d > maxD) maxD = d;
+    const pts: Point[] = [];
+    let k = cA;
+    while (true) {
+      pts.push(contour[k]);
+      if (k === cB) break;
       k = (k + 1) % contour.length;
     }
-    return maxD;
+    // The endpoints are the polygon vertices themselves (possibly shifted by
+    // straighten projections); only the INTERIOR contour points define the
+    // edge's intrinsic straightness. Short segments (tight curves' chords) are
+    // too short to demonstrate straightness - their mean deviation is trivially
+    // tiny - so they are not "straight" (the corner gate then rejects them,
+    // keeping tight curves smooth).
+    const interior = pts.slice(1, -1);
+    if (interior.length < 8) return Infinity;
+    let sx = 0, sy = 0;
+    for (const p of interior) { sx += p.x; sy += p.y; }
+    const cx = sx / interior.length, cy = sy / interior.length;
+    let xx = 0, xy = 0, yy = 0;
+    for (const p of interior) {
+      const px = p.x - cx, py = p.y - cy;
+      xx += px * px; xy += px * py; yy += py * py;
+    }
+    const theta = 0.5 * Math.atan2(2 * xy, xx - yy);
+    const dx = Math.cos(theta), dy = Math.sin(theta);
+    // MEAN absolute deviation: quantization jitter on a straight edge is a few
+    // sparse outliers (tiny mean), while a curved segment bows consistently
+    // (mean ~ half the sagitta). The max alone cannot separate the two.
+    let sumD = 0;
+    for (const p of interior) {
+      sumD += Math.abs((p.x - cx) * dy - (p.y - cy) * dx);
+    }
+    return sumD / interior.length;
   };
 
   for (let i = 0; i < len; i++) {
-    const prev = points[(i - 1 + len) % len];
+    // Skip degenerate neighbor edges (e.g. the polygon's tiny wrap-closing edge
+    // whose interior is empty) by stepping outward until a real edge is found.
+    let prevIdx = (i - 1 + len) % len;
+    for (let step = 0; step < 4 && edgeDev(prevIdx, i) === Infinity; step++) {
+      prevIdx = (prevIdx - 1 + len) % len;
+    }
+    let nextIdx = (i + 1) % len;
+    for (let step = 0; step < 4 && edgeDev(i, nextIdx) === Infinity; step++) {
+      nextIdx = (nextIdx + 1) % len;
+    }
+    const prev = points[prevIdx];
     const curr = points[i];
-    const next = points[(i + 1) % len];
+    const next = points[nextIdx];
 
     const v1x = curr.x - prev.x;
     const v1y = curr.y - prev.y;
@@ -263,14 +292,67 @@ export function potraceDetectCorners(
       continue;
     }
 
-    const dotProd = Math.max(-1, Math.min(1, (v1x * v2x + v1y * v2y) / (len1 * len2)));
-    const angle = Math.acos(dotProd);
+    // Compute the turn angle from the CONTOUR's local tangents (when the
+    // contour is available) rather than the polygon chords. A fillet's arc
+    // join is tangent-continuous: its first chord tilts ~85 deg from the
+    // edge (marking a false corner), but the contour tangents meet at ~0 deg
+    // (smooth, not a corner). Real corners and chamfers are tangent-
+    // discontinuous and keep their true angles.
+    let angle: number;
+    if (contour && contourIdx) {
+      const k = contourIdx[i];
+      const n = contour.length;
+      // Measure the edge directions in windows SKIP..SKIP+W contour points away
+      // from the vertex. The polygon vertex can sit 1-2px off the true corner
+      // (straighten projections), so an adjacent window would lie entirely on
+      // one edge and report 0 deg. Skipping the corner neighborhood keeps the
+      // windows on each edge proper. Windows shrink for tiny contours.
+      const SKIP = Math.max(1, Math.min(8, Math.floor(n / 12)));
+      const W = Math.max(2, Math.min(8, Math.floor(n / 12)));
+      const fitDir = (from: number, to: number): { dx: number; dy: number } => {
+        // least-squares direction of contour[from..to] (cyclic)
+        const pts: Point[] = [];
+        let idx = from;
+        while (true) {
+          pts.push(contour[((idx % n) + n) % n]);
+          if (idx === to) break;
+          idx = idx < to ? idx + 1 : idx - 1;
+        }
+        let sx = 0, sy = 0;
+        for (const p of pts) { sx += p.x; sy += p.y; }
+        const cx = sx / pts.length, cy = sy / pts.length;
+        let xx = 0, xy = 0, yy = 0;
+        for (const p of pts) {
+          const px = p.x - cx, py = p.y - cy;
+          xx += px * px; xy += px * py; yy += py * py;
+        }
+        const theta = 0.5 * Math.atan2(2 * xy, xx - yy);
+        return { dx: Math.cos(theta), dy: Math.sin(theta) };
+      };
+      const inDir = fitDir(k - (SKIP + W), k - SKIP);
+      const outDir = fitDir(k + SKIP, k + SKIP + W);
+      // Orient both by the travel direction (contour walks CCW after
+      // normalization) so sharp tips measure the full turn, not the acute
+      // complement.
+      const travel = (dx: number, dy: number, from: number, to: number) => {
+        const p1 = contour[((from % n) + n) % n];
+        const p2 = contour[((to % n) + n) % n];
+        return (p2.x - p1.x) * dx + (p2.y - p1.y) * dy >= 0 ? 1 : -1;
+      };
+      const inSign = travel(inDir.dx, inDir.dy, k - (SKIP + W), k - SKIP);
+      const outSign = travel(outDir.dx, outDir.dy, k + SKIP, k + SKIP + W);
+      const d = Math.max(-1, Math.min(1, inSign * outSign * (inDir.dx * outDir.dx + inDir.dy * outDir.dy)));
+      angle = Math.acos(d);
+    } else {
+      const dotProd = Math.max(-1, Math.min(1, (v1x * v2x + v1y * v2y) / (len1 * len2)));
+      angle = Math.acos(dotProd);
+    }
 
     if (angle >= minAngleRad) {
       if (contourIdx) {
         // Real corners connect two straight edges.
-        const devPrev = edgeDev((i - 1 + len) % len, i);
-        const devNext = edgeDev(i, (i + 1) % len);
+        const devPrev = edgeDev(prevIdx, i);
+        const devNext = edgeDev(i, nextIdx);
         if (devPrev < straightTol && devNext < straightTol) {
           cornerIndices.push(i);
         }
@@ -586,6 +668,6 @@ export function potraceFitContour(
   // Straighten long runs onto exact lines (letter strokes stay straight),
   // then drop any residual kinks introduced at run seams.
   polygon = simplifyNearCollinear(straightenRuns(polygon, alphamax * 0.35), alphamax * 0.4);
-  const corners = potraceDetectCorners(polygon, cornerThresholdDeg, normalized, Math.max(0.6, alphamax * 0.5));
+  const corners = potraceDetectCorners(polygon, cornerThresholdDeg, normalized, Math.max(0.35, alphamax * 0.25));
   return potraceFitBezierPath(polygon, corners, smoothness, alphamax);
 }
