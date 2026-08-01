@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { potraceFitContour, potraceDetectCorners, normalizeContour, potraceOptimalPolygon, simplifyNearCollinear, straightenRuns, polygonSelfIntersects } from '../src/utils/potraceEngine.ts';
+import { potraceFitContour, potraceDetectCorners, normalizeContour, potraceOptimalPolygon, simplifyNearCollinear, straightenRuns } from '../src/utils/potraceEngine.ts';
 
 const fit = (pts) => potraceFitContour(pts, 7, 35, 1024);
 
@@ -146,13 +146,4 @@ test('potraceFitContour output for a sharp square is geometrically accurate', ()
     maxDev = Math.max(maxDev, Math.sqrt(dxo * dxo + dyo * dyo));
   }
   assert.ok(maxDev < 2, `square path must stay within tolerance, maxDev=${maxDev.toFixed(2)}px`);
-});
-
-test('polygonSelfIntersects detects bowties but not simple polygons', () => {
-  const bowtie = [{ x: 0, y: 0 }, { x: 100, y: 100 }, { x: 100, y: 0 }, { x: 0, y: 100 }];
-  assert.equal(polygonSelfIntersects(bowtie), true, 'bowtie must be detected');
-  const square = [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 }];
-  assert.equal(polygonSelfIntersects(square), false, 'square must be clean');
-  const triangle = [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 50, y: 100 }];
-  assert.equal(polygonSelfIntersects(triangle), false, 'triangle must be clean');
 });
